@@ -3,6 +3,8 @@
 import { useNotification } from "@/app/(app)/context"
 import { uploadFilesAction } from "@/app/(app)/files/actions"
 import { uploadTransactionFilesAction } from "@/app/(app)/transactions/actions"
+import { ImageCropModal } from "@/components/files/image-crop-modal"
+import { useCropQueue } from "@/hooks/use-crop-queue"
 import { AlertCircle, CloudUpload, Loader2 } from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -16,27 +18,47 @@ export default function ScreenDropArea({ children }: { children: React.ReactNode
   const dragCounter = useRef(0)
   const { transactionId } = useParams()
 
+  const doUpload = useCallback(
+    async (files: File[]) => {
+      setIsUploading(true)
+      setUploadError("")
+      try {
+        const formData = new FormData()
+        if (transactionId) formData.append("transactionId", transactionId as string)
+        for (const file of files) formData.append("files", file)
+
+        const result = transactionId
+          ? await uploadTransactionFilesAction(formData)
+          : await uploadFilesAction(formData)
+
+        if (result.success) {
+          showNotification({ code: "sidebar.unsorted", message: "new" })
+          setTimeout(() => showNotification({ code: "sidebar.unsorted", message: "" }), 3000)
+          if (!transactionId) router.push("/unsorted")
+        } else {
+          setUploadError(result.error ?? "Something went wrong...")
+        }
+      } catch (error) {
+        setUploadError(error instanceof Error ? error.message : "Something went wrong...")
+      } finally {
+        setIsUploading(false)
+      }
+    },
+    [transactionId, router, showNotification]
+  )
+
+  const { startQueue, confirmCurrent, skipCurrent, currentFile, currentIndex, totalFiles } = useCropQueue()
+
   const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
-
-    // Check if the dragged items are files
     const items = e.dataTransfer.items
     if (!items) return
-
     let hasFiles = false
-    for (const item of items) {
-      if (item.kind === "file") {
-        hasFiles = true
-        break
-      }
-    }
+    for (const item of items) if (item.kind === "file") { hasFiles = true; break }
     if (!hasFiles) return
-
     dragCounter.current++
-    if (dragCounter.current === 1) {
-      setIsDragging(true)
-    }
+    if (dragCounter.current === 1) setIsDragging(true)
   }
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -48,66 +70,28 @@ export default function ScreenDropArea({ children }: { children: React.ReactNode
     e.preventDefault()
     e.stopPropagation()
     dragCounter.current--
-
-    if (dragCounter.current === 0) {
-      setIsDragging(false)
-    }
+    if (dragCounter.current === 0) setIsDragging(false)
   }
 
   const handleDrop = useCallback(
     async (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault()
       e.stopPropagation()
-
-      // Reset counter and dragging state
       dragCounter.current = 0
       setIsDragging(false)
-
       const files = e.dataTransfer.files
       if (files && files.length > 0) {
-        setIsUploading(true)
-        setUploadError("")
-
-        try {
-          const formData = new FormData()
-          if (transactionId) {
-            formData.append("transactionId", transactionId as string)
-          }
-          for (let i = 0; i < files.length; i++) {
-            formData.append("files", files[i])
-          }
-
-          const result = transactionId
-            ? await uploadTransactionFilesAction(formData)
-            : await uploadFilesAction(formData)
-
-          if (result.success) {
-            showNotification({ code: "sidebar.unsorted", message: "new" })
-            setTimeout(() => showNotification({ code: "sidebar.unsorted", message: "" }), 3000)
-            if (!transactionId) {
-              router.push("/unsorted")
-            }
-          } else {
-            setUploadError(result.error ? result.error : "Something went wrong...")
-          }
-        } catch (error) {
-          console.error("Upload error:", error)
-          setUploadError(error instanceof Error ? error.message : "Something went wrong...")
-        } finally {
-          setIsUploading(false)
-        }
+        startQueue(Array.from(files), doUpload)
       }
     },
-    [transactionId, router, showNotification]
+    [doUpload, startQueue]
   )
 
-  // Add event listeners to document body
   useEffect(() => {
     document.body.addEventListener("dragenter", handleDragEnter as unknown as EventListener)
     document.body.addEventListener("dragover", handleDragOver as unknown as EventListener)
     document.body.addEventListener("dragleave", handleDragLeave as unknown as EventListener)
     document.body.addEventListener("drop", handleDrop as unknown as EventListener)
-
     return () => {
       document.body.removeEventListener("dragenter", handleDragEnter as unknown as EventListener)
       document.body.removeEventListener("dragover", handleDragOver as unknown as EventListener)
@@ -157,6 +141,16 @@ export default function ScreenDropArea({ children }: { children: React.ReactNode
             <p className="text-gray-600 dark:text-gray-400">{uploadError}</p>
           </div>
         </div>
+      )}
+
+      {currentFile && (
+        <ImageCropModal
+          file={currentFile}
+          index={currentIndex}
+          total={totalFiles}
+          onConfirm={confirmCurrent}
+          onSkip={skipCurrent}
+        />
       )}
     </div>
   )

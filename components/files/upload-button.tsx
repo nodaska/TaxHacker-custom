@@ -2,11 +2,13 @@
 
 import { useNotification } from "@/app/(app)/context"
 import { uploadFilesAction } from "@/app/(app)/files/actions"
+import { ImageCropModal } from "@/components/files/image-crop-modal"
 import { Button } from "@/components/ui/button"
+import { useCropQueue } from "@/hooks/use-crop-queue"
 import config from "@/lib/config"
 import { Loader2 } from "lucide-react"
 import { useRouter } from "next/navigation"
-import { ComponentProps, startTransition, useRef, useState } from "react"
+import { ComponentProps, startTransition, useCallback, useRef, useState } from "react"
 import { FormError } from "../forms/error"
 
 export function UploadButton({ children, ...props }: { children: React.ReactNode } & ComponentProps<typeof Button>) {
@@ -16,18 +18,11 @@ export function UploadButton({ children, ...props }: { children: React.ReactNode
   const [uploadError, setUploadError] = useState("")
   const [isUploading, setIsUploading] = useState(false)
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    setUploadError("")
-    setIsUploading(true)
-    if (e.target.files && e.target.files.length > 0) {
+  const doUpload = useCallback(
+    async (files: File[]) => {
+      setIsUploading(true)
       const formData = new FormData()
-
-      // Append all selected files to the FormData
-      for (let i = 0; i < e.target.files.length; i++) {
-        formData.append("files", e.target.files[i])
-      }
-
-      // Submit the files using the server action
+      for (const file of files) formData.append("files", file)
       startTransition(async () => {
         const result = await uploadFilesAction(formData)
         if (result.success) {
@@ -35,15 +30,26 @@ export function UploadButton({ children, ...props }: { children: React.ReactNode
           setTimeout(() => showNotification({ code: "sidebar.unsorted", message: "" }), 3000)
           router.push("/unsorted")
         } else {
-          setUploadError(result.error ? result.error : "Something went wrong...")
+          setUploadError(result.error ?? "Something went wrong...")
         }
         setIsUploading(false)
       })
-    }
+    },
+    [router, showNotification]
+  )
+
+  const { startQueue, confirmCurrent, skipCurrent, currentFile, currentIndex, totalFiles } = useCropQueue()
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setUploadError("")
+    if (!e.target.files || e.target.files.length === 0) return
+    const files = Array.from(e.target.files)
+    startQueue(files, doUpload)
+    e.target.value = ""
   }
 
   const handleButtonClick = (e: React.MouseEvent) => {
-    e.preventDefault() // Prevent any form submission
+    e.preventDefault()
     fileInputRef.current?.click()
   }
 
@@ -71,6 +77,16 @@ export function UploadButton({ children, ...props }: { children: React.ReactNode
       </Button>
 
       {uploadError && <FormError>{uploadError}</FormError>}
+
+      {currentFile && (
+        <ImageCropModal
+          file={currentFile}
+          index={currentIndex}
+          total={totalFiles}
+          onConfirm={confirmCurrent}
+          onSkip={skipCurrent}
+        />
+      )}
     </div>
   )
 }
