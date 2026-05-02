@@ -32,8 +32,10 @@ function detectBounds(img: HTMLImageElement): Rect {
     return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
   }
 
-  // ── Pass 1: row/column variance ──
-  // Rows containing text or edges have high variance; smooth background rows don't.
+  // ── Pass 1: per-axis variance ──
+  // Each row/column gets a variance score. Background rows/cols (uniform colour) score low;
+  // receipt rows/cols (text, edges) score high. Crucially, each axis is evaluated
+  // independently — a portrait receipt spans the full height but not the full width.
   const rowVar = new Float32Array(sh)
   const colVar = new Float32Array(sw)
   for (let y = 0; y < sh; y++) {
@@ -57,24 +59,30 @@ function detectBounds(img: HTMLImageElement): Rect {
     if (colVar[x] > VAR_THRESHOLD) { if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; colFound = true }
   }
 
-  if (rowFound && colFound) {
-    const fracH = (ry1 - ry0) / sh
-    const fracW = (cx1 - cx0) / sw
-    if (fracH > 0.08 && fracH < 0.94 && fracW > 0.08 && fracW < 0.94) {
-      const pad = Math.round(10 / ratio)
-      const nx = Math.max(0, Math.round(cx0 / ratio) - pad)
-      const ny = Math.max(0, Math.round(ry0 / ratio) - pad)
-      return {
-        x: nx,
-        y: ny,
-        w: Math.min(img.naturalWidth - nx, Math.round((cx1 - cx0) / ratio) + pad * 2),
-        h: Math.min(img.naturalHeight - ny, Math.round((ry1 - ry0) / ratio) + pad * 2),
-      }
+  // Evaluate each axis independently: use the detected boundary only if it gives a
+  // meaningfully tighter crop than the full image. Otherwise keep the full axis.
+  const fracH = rowFound ? (ry1 - ry0) / sh : 1
+  const fracW = colFound ? (cx1 - cx0) / sw : 1
+  const useRows = rowFound && fracH > 0.08 && fracH < 0.93
+  const useCols = colFound && fracW > 0.08 && fracW < 0.93
+
+  if (useRows || useCols) {
+    const pad = Math.round(10 / ratio)
+    const fx0 = useCols ? cx0 : 0
+    const fx1 = useCols ? cx1 : sw
+    const fy0 = useRows ? ry0 : 0
+    const fy1 = useRows ? ry1 : sh
+    const nx = Math.max(0, Math.round(fx0 / ratio) - pad)
+    const ny = Math.max(0, Math.round(fy0 / ratio) - pad)
+    return {
+      x: nx,
+      y: ny,
+      w: Math.min(img.naturalWidth - nx, Math.round((fx1 - fx0) / ratio) + pad * 2),
+      h: Math.min(img.naturalHeight - ny, Math.round((fy1 - fy0) / ratio) + pad * 2),
     }
   }
 
   // ── Pass 2: corner-sampled brightness threshold ──
-  // Sample the 4 corners (most likely background) to estimate background brightness.
   const cs = Math.max(4, Math.round(Math.min(sw, sh) * 0.06))
   let sum = 0, n = 0
   for (let dy = 0; dy < cs; dy++) {
