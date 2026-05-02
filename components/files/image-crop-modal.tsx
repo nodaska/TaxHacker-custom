@@ -16,7 +16,7 @@ interface Props {
 }
 
 function detectBounds(img: HTMLImageElement): Rect {
-  const SAMPLE = 400
+  const SAMPLE = 500
   const ratio = Math.min(1, SAMPLE / img.naturalWidth, SAMPLE / img.naturalHeight)
   const sw = Math.round(img.naturalWidth * ratio)
   const sh = Math.round(img.naturalHeight * ratio)
@@ -27,62 +27,98 @@ function detectBounds(img: HTMLImageElement): Rect {
   ctx.drawImage(img, 0, 0, sw, sh)
   const { data } = ctx.getImageData(0, 0, sw, sh)
 
-  const luma = (i: number) => 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-
-  // Sample border pixels to estimate background brightness
-  let sum = 0
-  let n = 0
-  for (let x = 0; x < sw; x++) {
-    sum += luma(x * 4)
-    sum += luma(((sh - 1) * sw + x) * 4)
-    n += 2
+  const px = (x: number, y: number) => {
+    const i = (y * sw + x) * 4
+    return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
   }
-  for (let y = 1; y < sh - 1; y++) {
-    sum += luma(y * sw * 4)
-    sum += luma((y * sw + sw - 1) * 4)
-    n += 2
-  }
-  const bg = sum / n
 
-  // Foreground is the opposite of background
-  const isFg =
-    bg > 128
-      ? (i: number) => bg - luma(i) > 40 // dark content on bright background
-      : (i: number) => luma(i) - bg > 40 // bright content on dark background
-
-  let x0 = sw, y0 = sh, x1 = 0, y1 = 0
-  let found = false
+  // ── Pass 1: row/column variance ──
+  // Rows containing text or edges have high variance; smooth background rows don't.
+  const rowVar = new Float32Array(sh)
+  const colVar = new Float32Array(sw)
   for (let y = 0; y < sh; y++) {
-    for (let x = 0; x < sw; x++) {
-      if (isFg((y * sw + x) * 4)) {
-        if (x < x0) x0 = x
-        if (x > x1) x1 = x
-        if (y < y0) y0 = y
-        if (y > y1) y1 = y
-        found = true
+    let s = 0, s2 = 0
+    for (let x = 0; x < sw; x++) { const l = px(x, y); s += l; s2 += l * l }
+    rowVar[y] = s2 / sw - (s / sw) ** 2
+  }
+  for (let x = 0; x < sw; x++) {
+    let s = 0, s2 = 0
+    for (let y = 0; y < sh; y++) { const l = px(x, y); s += l; s2 += l * l }
+    colVar[x] = s2 / sh - (s / sh) ** 2
+  }
+
+  const VAR_THRESHOLD = 120
+  let ry0 = sh, ry1 = 0, cx0 = sw, cx1 = 0
+  let rowFound = false, colFound = false
+  for (let y = 0; y < sh; y++) {
+    if (rowVar[y] > VAR_THRESHOLD) { if (y < ry0) ry0 = y; if (y > ry1) ry1 = y; rowFound = true }
+  }
+  for (let x = 0; x < sw; x++) {
+    if (colVar[x] > VAR_THRESHOLD) { if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; colFound = true }
+  }
+
+  if (rowFound && colFound) {
+    const fracH = (ry1 - ry0) / sh
+    const fracW = (cx1 - cx0) / sw
+    if (fracH > 0.08 && fracH < 0.94 && fracW > 0.08 && fracW < 0.94) {
+      const pad = Math.round(10 / ratio)
+      const nx = Math.max(0, Math.round(cx0 / ratio) - pad)
+      const ny = Math.max(0, Math.round(ry0 / ratio) - pad)
+      return {
+        x: nx,
+        y: ny,
+        w: Math.min(img.naturalWidth - nx, Math.round((cx1 - cx0) / ratio) + pad * 2),
+        h: Math.min(img.naturalHeight - ny, Math.round((ry1 - ry0) / ratio) + pad * 2),
       }
     }
   }
 
-  // Fallback: use 96% of image centered
-  if (!found || x1 - x0 < sw * 0.1 || y1 - y0 < sh * 0.1) {
-    const p = 0.02
-    return {
-      x: Math.round(img.naturalWidth * p),
-      y: Math.round(img.naturalHeight * p),
-      w: Math.round(img.naturalWidth * (1 - p * 2)),
-      h: Math.round(img.naturalHeight * (1 - p * 2)),
+  // ── Pass 2: corner-sampled brightness threshold ──
+  // Sample the 4 corners (most likely background) to estimate background brightness.
+  const cs = Math.max(4, Math.round(Math.min(sw, sh) * 0.06))
+  let sum = 0, n = 0
+  for (let dy = 0; dy < cs; dy++) {
+    for (let dx = 0; dx < cs; dx++) {
+      sum += px(dx, dy) + px(sw - 1 - dx, dy) + px(dx, sh - 1 - dy) + px(sw - 1 - dx, sh - 1 - dy)
+      n += 4
     }
   }
+  const bg = sum / n
 
-  const pad = Math.round(8 / ratio)
-  const nx = Math.max(0, Math.round(x0 / ratio) - pad)
-  const ny = Math.max(0, Math.round(y0 / ratio) - pad)
+  const tryDetect = (thresh: number) => {
+    const isFg = bg > 128
+      ? (x: number, y: number) => bg - px(x, y) > thresh
+      : (x: number, y: number) => px(x, y) - bg > thresh
+    let x0 = sw, y0 = sh, x1 = 0, y1 = 0, found = false
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        if (isFg(x, y)) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; found = true }
+      }
+    }
+    if (!found) return null
+    const frac = ((x1 - x0) * (y1 - y0)) / (sw * sh)
+    return frac > 0.08 && frac < 0.94 ? { x0, y0, x1, y1 } : null
+  }
+
+  const result = tryDetect(20) ?? tryDetect(12)
+
+  const fallback = (): Rect => ({
+    x: Math.round(img.naturalWidth * 0.02),
+    y: Math.round(img.naturalHeight * 0.02),
+    w: Math.round(img.naturalWidth * 0.96),
+    h: Math.round(img.naturalHeight * 0.96),
+  })
+
+  if (!result) return fallback()
+
+  const pad = Math.round(10 / ratio)
+  const nx = Math.max(0, Math.round(result.x0 / ratio) - pad)
+  const ny = Math.max(0, Math.round(result.y0 / ratio) - pad)
   return {
     x: nx,
     y: ny,
-    w: Math.min(img.naturalWidth - nx, Math.round((x1 - x0) / ratio) + pad * 2),
-    h: Math.min(img.naturalHeight - ny, Math.round((y1 - y0) / ratio) + pad * 2),
+    w: Math.min(img.naturalWidth - nx, Math.round((result.x1 - result.x0) / ratio) + pad * 2),
+    h: Math.min(img.naturalHeight - ny, Math.round((result.y1 - result.y0) / ratio) + pad * 2),
   }
 }
 
@@ -229,7 +265,6 @@ export function ImageCropModal({ file, index, total, onConfirm, onSkip }: Props)
 
         {crop && (
           <>
-            {/* Darkened regions outside crop */}
             <div className="absolute inset-0 pointer-events-none">
               <div className="absolute left-0 right-0 bg-black/55" style={{ top: 0, height: pct(crop.y, naturalSize.h) }} />
               <div className="absolute left-0 right-0 bg-black/55" style={{ top: pct(crop.y + crop.h, naturalSize.h), bottom: 0 }} />
@@ -248,7 +283,6 @@ export function ImageCropModal({ file, index, total, onConfirm, onSkip }: Props)
               />
             </div>
 
-            {/* Crop frame + handles */}
             <div
               className="absolute border border-white"
               style={{
@@ -258,7 +292,6 @@ export function ImageCropModal({ file, index, total, onConfirm, onSkip }: Props)
                 height: pct(crop.h, naturalSize.h),
               }}
             >
-              {/* Rule-of-thirds grid */}
               <div className="absolute inset-0 pointer-events-none">
                 <div className="absolute top-0 bottom-0 border-r border-white/20" style={{ left: "33.33%" }} />
                 <div className="absolute top-0 bottom-0 border-r border-white/20" style={{ left: "66.66%" }} />
@@ -266,13 +299,11 @@ export function ImageCropModal({ file, index, total, onConfirm, onSkip }: Props)
                 <div className="absolute left-0 right-0 border-b border-white/20" style={{ top: "66.66%" }} />
               </div>
 
-              {/* Interior drag zone */}
               <div
                 className="absolute inset-0 cursor-move"
                 onPointerDown={(e) => handlePointerDown(e, "move")}
               />
 
-              {/* Corner + edge handles */}
               {HANDLES.map(([h, cls]) => (
                 <div
                   key={h}
