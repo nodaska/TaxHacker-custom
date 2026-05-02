@@ -7,11 +7,11 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { useCropQueue } from "@/hooks/use-crop-queue"
 import config from "@/lib/config"
-import { File, Transaction } from "@/prisma/client"
+import { File as PrismaFile, Transaction } from "@/prisma/client"
 import { Loader2, Upload, X } from "lucide-react"
 import { useCallback, useState } from "react"
 
-export default function TransactionFiles({ transaction, files }: { transaction: Transaction; files: File[] }) {
+export default function TransactionFiles({ transaction, files }: { transaction: Transaction; files: PrismaFile[] }) {
   const [isUploading, setIsUploading] = useState(false)
 
   const handleDeleteFile = async (fileId: string) => {
